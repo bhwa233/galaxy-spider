@@ -183,6 +183,7 @@ export interface WeiboTopicResponse {
     ok: number;
     data: {
         pageInfo: PageInfo;
+        cardlistInfo?: WeiboCardlistInfo;
         cards: Card[];
         scheme: string;
         showAppTips: number;

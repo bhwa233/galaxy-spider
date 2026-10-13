@@ -15,7 +15,7 @@ A web crawler system designed to collect media content from Weibo topics and use
 
 ## Prerequisites / 环境要求
 
-- Node.js >= 16
+- Node.js >= 22
 - [pnpm](https://pnpm.io/) package manager
 - Database (supported by Prisma)
 
@@ -67,6 +67,42 @@ src/
 - `vitest` - Testing framework
 
 ## Development / 开发
+
+### 微博登录态与 CI 故障恢复
+
+GitHub Actions 的 Producer 和 Consumer 都会从 Gist 获取最新的
+`weibo.storage.json`。在仓库 Actions secrets 中配置 `GIST_ID`、
+`ACCESS_TOKEN`（需要读写该 Gist）和 `DATABASE_URL`。
+下载失败、登录失效或接口拒绝请求会使任务失败。正常空列表仍会成功结束。
+运行数据写入数据库，CI 不再自动提交文件，避免把更新后的登录态提交到仓库。
+
+登录态失效时，在有图形界面的电脑上准备 `.env`：
+
+```dotenv
+GIST_ID=你的GistID
+GIST_TOKEN=有该Gist读写权限的Token
+STORAGE_STATE_PATH=weibo.storage.json
+```
+
+```bash
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
+pnpm storage:refresh
+```
+
+依次完成网页端与移动端微博登录，按终端提示回车。脚本会验证两端接口可用，
+然后保存登录态并上传 Gist。刷新后手动运行 Producer，成功后再运行 Consumer。
+本地可运行 `pnpm storage:fetch` 检查 Gist 下载与 Cookie 格式。
+
+若刷新后 CI 仍返回 HTTP 418/432，说明登录态刷新尚未解决运行环境中的拦截，
+应在同一登录态下对比本地与 CI 请求，确认原因后再考虑使用自己的 runner。
+不要对被拦截的接口持续重试。
+
+不连接数据库或微博的故障回归检查：
+
+```bash
+pnpm exec vitest run test/producers/weibo-failure.test.ts test/utils/storageState.test.ts
+```
 
 The project uses TypeScript and follows a modular architecture. The producer modules collect data from Weibo, while the consumer modules process and store the collected data.
 

@@ -9,9 +9,13 @@ jobs:
   media-consumer:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 添加写入权限以便提交
+      contents: read
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GIST_ID: ${{ secrets.GIST_ID }}
+      GIST_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+      GIST_STORAGE_STATE_FILENAME: weibo.storage.json
+      STORAGE_STATE_PATH: weibo.storage.json
     
     steps:
       - name: Checkout Code
@@ -28,7 +32,7 @@ jobs:
           version: 8
 
       - name: Install Dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Generate Prisma Client
         run: pnpm exec prisma generate
@@ -36,16 +40,11 @@ jobs:
       - name: Install Playwright Browsers
         run: pnpm exec playwright install chromium
 
+      - name: Install Playwright System Dependencies
+        run: pnpm exec playwright install-deps chromium
+
+      - name: Fetch storageState from Gist
+        run: pnpm run storage:fetch
+
       - name: Run Consumer
         run: pnpm run consume
-
-      - name: Configure Git
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-
-      - name: Commit and Push Changes
-        run: |
-          git add -A
-          git commit --allow-empty -m "chore: auto update data - consumer run at $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push

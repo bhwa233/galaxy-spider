@@ -3,9 +3,11 @@
  * 打开浏览器完成登录后导出 storageState 并上传到 Gist
  */
 
+import 'dotenv/config';
 import { chromium } from 'playwright';
 import readline from 'node:readline';
 import { updateStorageStateToGist } from '../utils/storageState';
+import { readWeiboResponse } from '../producers/weibo/response';
 
 const storageStatePath = process.env.STORAGE_STATE_PATH || 'weibo.storage.json';
 const loginUrl = process.env.WEIBO_LOGIN_URL || 'https://weibo.com/';
@@ -39,6 +41,27 @@ async function main() {
         await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
         console.log(`已打开登录页面: ${loginUrl}`);
         await waitForUserOrTimeout();
+
+        // 两个域名的登录态都需建立，不能只导出 weibo.com 的 Cookie。
+        await page.goto('https://m.weibo.cn/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        console.log('请确认移动版微博也已登录；若出现登录页，请完成登录。');
+        await waitForUserOrTimeout();
+
+        const mobileConfig = await readWeiboResponse<{ data?: { login?: boolean } }>(
+            await context.request.get('https://m.weibo.cn/api/config', { timeout: 60000 })
+        );
+        if (mobileConfig.data?.login !== true) {
+            throw new Error('移动版微博尚未登录，未上传登录态');
+        }
+        const userId = process.env.WEIBO_CHECK_USER_ID || '5286960038';
+        const personal = await readWeiboResponse<{ ok: number; data?: { list?: unknown[] } }>(
+            await context.request.get(`https://weibo.com/ajax/statuses/mymblog?uid=${encodeURIComponent(userId)}&page=1&feature=0`, {
+                headers: { referer: `https://weibo.com/u/${userId}` }, timeout: 60000
+            })
+        );
+        if (personal.ok !== 1 || !Array.isArray(personal.data?.list)) {
+            throw new Error('个人主页接口校验失败，未上传登录态');
+        }
 
         await context.storageState({ path: storageStatePath });
         console.log(`✅ storageState 已保存到 ${storageStatePath}`);
