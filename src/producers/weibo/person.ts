@@ -84,13 +84,15 @@ function parseWeiboTime(timeText: string): Date {
 }
 
 function hasMedia(mblog: WeiboMblog): boolean {
+    // 微博接口偶尔返回对象形式的 pics，以 pic_ids 和 page_info 为准。
+    const pics = Array.isArray(mblog.pics) ? mblog.pics : [];
     // 检查是否有图片
-    const hasImages = (mblog.pic_ids?.length > 0) || (mblog.pics && mblog.pics.length > 0);
+    const hasImages = (mblog.pic_ids?.length > 0) || pics.length > 0;
 
     // 检查是否有视频
     const hasVideo =
         (mblog.page_info?.type === "video") ||
-        (mblog?.pics?.some(pic => pic?.type === "video") ?? false);
+        pics.some(pic => pic?.type === "video");
 
     return hasImages || hasVideo;
 }

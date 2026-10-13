@@ -78,4 +78,12 @@ describe('微博线上爬取失败', () => {
         }));
         await expect(processUserPost(producer, 1)).resolves.toBe(1);
     });
+
+    // 线上全量验证有一条微博的 pics 是对象，some() 异常导致有图片的帖子被跳过。
+    it('pics 返回对象时仍能识别 pic_ids 中的图片', async () => {
+        respond(200, JSON.stringify({
+            ok: 1, data: { list: [{ id: '2', pic_ids: ['image'], pics: {} }] }
+        }));
+        await expect(processUserPost(producer, 1)).resolves.toBe(1);
+    });
 });
