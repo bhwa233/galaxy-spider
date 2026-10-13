@@ -1,4 +1,4 @@
-import { Browser, BrowserContext, Page } from 'playwright';
+import type { Browser, BrowserContext, Page } from 'playwright';
 import playwright from 'playwright';
 import { resolveStorageStatePath } from '../utils/storageState';
 
@@ -16,19 +16,13 @@ class BrowserManager {
     }
 
     async createPage(): Promise<Page> {
+        const resolvedStorageStatePath = await resolveStorageStatePath();
         const browser = await this.getBrowser();
         // 每次都创建新的 context 和 page，避免并发冲突
         if (this.context) {
             await this.context.close();
         }
-        const resolvedStorageStatePath = await resolveStorageStatePath();
-        const contextOptions = resolvedStorageStatePath
-            ? { storageState: resolvedStorageStatePath }
-            : {};
-        this.context = await browser.newContext(contextOptions);
-        if (!resolvedStorageStatePath) {
-            console.log('⚠️ 未找到 storageState，可能会触发登录要求');
-        }
+        this.context = await browser.newContext({ storageState: resolvedStorageStatePath });
         return await this.context.newPage();
     }
 

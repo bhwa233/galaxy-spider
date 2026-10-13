@@ -9,11 +9,10 @@ jobs:
   produce-weibo:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 添加写入权限以便提交
+      contents: read
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       GIST_ID: ${{ secrets.GIST_ID }}
-      GITHUB_TOKEN: ${{ secrets.ACCESS_TOKEN }}
       GIST_TOKEN: ${{ secrets.ACCESS_TOKEN }}
       GIST_STORAGE_STATE_FILENAME: weibo.storage.json
       STORAGE_STATE_PATH: weibo.storage.json
@@ -33,7 +32,7 @@ jobs:
           version: 8
 
       - name: Install Dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Generate Prisma Client
         run: pnpm exec prisma generate
@@ -44,21 +43,11 @@ jobs:
       - name: Install Playwright System Dependencies
         run: pnpm exec playwright install-deps chromium
 
+      - name: Run Crawler Regression Tests
+        run: pnpm exec vitest run test/producers/weibo-failure.test.ts test/utils/storageState.test.ts
+
       - name: Fetch storageState from Gist
-        continue-on-error: true
-        run: |
-          node -e "const fs=require('fs'); (async()=>{const gistId=process.env.GIST_ID; const token=process.env.GIST_TOKEN; if(!gistId||!token){console.warn('Missing GIST_ID or GIST_TOKEN'); return;} const res=await fetch('https://api.github.com/gists/'+gistId,{headers:{Authorization:'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}}); if(!res.ok){console.warn('Gist fetch failed: '+res.status); return;} const data=await res.json(); const files=data.files||{}; const name=process.env.GIST_STORAGE_STATE_FILENAME||'weibo.storage.json'; const file=files[name]; if(!file){console.warn('storageState file not found in Gist'); return;} let content=file.content; if(file.truncated && file.raw_url){const raw=await fetch(file.raw_url,{headers:{Authorization:'Bearer '+token,'Accept':'application/vnd.github+json'}}); if(!raw.ok){console.warn('Gist raw fetch failed: '+raw.status); return;} content=await raw.text();} fs.writeFileSync(process.env.STORAGE_STATE_PATH||'weibo.storage.json', content, 'utf8'); console.log('storageState saved');})().catch(e=>{console.warn(e);});"
+        run: pnpm run storage:fetch
 
       - name: Run Producer
-        run: pnpm run produce  # 需要在 package.json 中添加这个命令 
-
-      - name: Configure Git
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-
-      - name: Commit and Push Changes
-        run: |
-          git add -A
-          git commit --allow-empty -m "chore: auto update data - producer run at $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push
+        run: pnpm run produce

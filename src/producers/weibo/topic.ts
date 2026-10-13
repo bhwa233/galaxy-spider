@@ -6,6 +6,7 @@ import { processPost } from './person';
 import type { Card, WeiboTopicResponse } from './types';
 import { browserManager } from '../../browser';
 import { config } from '../../config';
+import { readWeiboResponse, WeiboRequestError } from './response';
 
 //Constants
 const API_CONFIG = {
@@ -18,24 +19,6 @@ const API_CONFIG = {
     postedMaxPages: 5
 } as const;
 
-/**
- * 检测错误是否是 Cookie 失效/登录问题
- */
-function isLoginError(error: any): boolean {
-    const errorStr = String(error).toLowerCase();
-    const loginKeywords = [
-        '扫描二维码',
-        '扫码登录',
-        '登录',
-        'login',
-        '验证',
-        'not valid json',
-        'unexpected token'
-    ];
-    
-    return loginKeywords.some(keyword => errorStr.includes(keyword));
-}
-
 // 递归提取所有 card_type 为 9 的卡片
 function extractType9Cards(data: Card[]): Card[] {
     const type9Cards: Card[] = [];
@@ -43,7 +26,7 @@ function extractType9Cards(data: Card[]): Card[] {
     // Start processing directly with the input array
     function processCards(cards: Card[]) {
         cards.forEach(card => {
-            if (card.card_type === '9') {
+            if (String(card.card_type) === '9') {
                 type9Cards.push(card);
             }
 
@@ -95,33 +78,32 @@ export const processTopicPost = async (producer: Producer, maxPages: number): Pr
 
                     const url = `${API_CONFIG.baseUrl}?${params.toString()}`;
                     log(`正在访问URL: ${url}`, 'info');
-                    await page.goto(url, { 
-                        waitUntil: 'networkidle',
+                    const httpResponse = await page.goto(url, {
+                        waitUntil: 'domcontentloaded',
                         timeout: 60000 
                     });
-                    
-                    await page.waitForTimeout(2000);
-                    
-                    const content = await page.textContent('body');
-                    if (!content) {
-                        throw new Error('页面内容为空');
+                    if (!httpResponse) {
+                        throw new Error('微博话题请求没有返回响应');
                     }
-                    
-                    const response: WeiboTopicResponse = JSON.parse(content);
 
-                    if (!response.ok || !response.data.cards?.length) {
+                    const response = await readWeiboResponse<WeiboTopicResponse>(httpResponse);
+                    if (response.ok !== 1 || !Array.isArray(response.data?.cards)) {
+                        throw new WeiboRequestError('微博话题响应异常，未返回有效的 data.cards');
+                    }
+                    if (!response.data.cards.length) {
                         log(`[页面进度 ${pageNum + 1}/${actualMaxPages}] 没有更多数据，结束获取`, 'info');
                         pageSuccess = true;
+                        sinceId = undefined;
                         break;
                     }
 
-                    sinceId = response.data.pageInfo.since_id;
+                    sinceId = response.data.pageInfo?.since_id ?? response.data.cardlistInfo?.since_id;
                     const validCards = extractType9Cards(response.data.cards);
 
                     if (!validCards.length) {
                         log(`[页面进度 ${pageNum + 1}/${actualMaxPages}] 未找到有效帖子，继续下一页`, 'info');
                         pageSuccess = true;
-                        continue;
+                        break;
                     }
 
                     log(`[页面进度 ${pageNum + 1}/${actualMaxPages}] 获取成功，找到 ${validCards.length} 条帖子`, 'info');
@@ -142,11 +124,8 @@ export const processTopicPost = async (producer: Producer, maxPages: number): Pr
                     pageSuccess = true;
 
                 } catch (error) {
-                    const isLogin = isLoginError(error);
-                    
-                    if (isLogin) {
-                        log(`[页面进度 ${pageNum + 1}/${actualMaxPages}] 检测到 Cookie 失效: ${error}`, 'error');
-                        break;
+                    if (error instanceof WeiboRequestError) {
+                        throw error;
                     } else {
                         log(`[页面进度 ${pageNum + 1}/${actualMaxPages}] 获取失败 (非登录问题): ${error}`, 'error');
                         // 非登录问题，简单重试一次
@@ -154,7 +133,7 @@ export const processTopicPost = async (producer: Producer, maxPages: number): Pr
                             log(`[页面进度 ${pageNum + 1}/${actualMaxPages}] 等待 2 秒后重试...`, 'info');
                             await sleep(2000);
                         } else {
-                            break; // 重试失败，跳过该页面
+                            throw error;
                         }
                     }
                     
@@ -233,7 +212,7 @@ export const processWeiboTopic = async (maxPages: number = API_CONFIG.defaultMax
         return totalCount;
     } catch (error) {
         log('微博话题处理失败: ' + error, 'error');
-        return 0;
+        throw error;
     } finally {
         // 清理浏览器资源
         await browserManager.cleanup();

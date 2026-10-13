@@ -4,6 +4,7 @@ import { processWeiboTopic } from './producers/weibo/topic';
 import { log } from './utils/log';
 import { formatDuration } from './utils/format';
 import { config } from './config';
+import { prisma } from './db';
 
 
 async function main() {
@@ -34,6 +35,12 @@ async function main() {
         log(`🎉 所有任务执行完毕! 总耗时: ${formatDuration(processEndTime - startTime)}`, 'success');
     } catch (error) {
         log(`❌ 执行出错 (运行时长: ${formatDuration(Date.now() - startTime)}): ${error}`, 'error');
+        process.exitCode = 1;
+    } finally {
+        await prisma.$disconnect();
     }
 }
-main();
+main().catch(error => {
+    log(`❌ 清理任务失败: ${error}`, 'error');
+    process.exitCode = 1;
+});

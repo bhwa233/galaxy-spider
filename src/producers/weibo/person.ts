@@ -8,6 +8,7 @@ import type { PageResult } from './types';
 import { getProducers, getProducerById, updateProducerLastPostTime } from '../../db/producer';
 import { browserManager } from '../../browser';
 import { config } from '../../config';
+import { readWeiboResponse, WeiboRequestError } from './response';
 
 // Constants
 const API_CONFIG = {
@@ -82,25 +83,6 @@ function parseWeiboTime(timeText: string): Date {
     }
 }
 
-/**
- * 检测错误是否是 Cookie 失效/登录问题
- */
-function isLoginError(error: any): boolean {
-    const errorStr = String(error).toLowerCase();
-    const loginKeywords = [
-        '扫描二维码',
-        '扫码登录',
-        '登录',
-        'login',
-        '请登录',
-        '验证',
-        'not valid json',
-        'unexpected token'
-    ];
-    
-    return loginKeywords.some(keyword => errorStr.includes(keyword));
-}
-
 function hasMedia(mblog: WeiboMblog): boolean {
     // 检查是否有图片
     const hasImages = (mblog.pic_ids?.length > 0) || (mblog.pics && mblog.pics.length > 0);
@@ -136,19 +118,13 @@ const fetchPage = async (userId: string, pageNum: number, page: Page): Promise<P
     log(`正在访问URL: ${url}`, 'info');
 
     const response = await page.request.get(url, {
-        headers: getRequestHeaders(userId)
+        headers: getRequestHeaders(userId),
+        timeout: 60000
     });
 
-    if (response.status() !== 200) {
-        if (response.status() === 403) {
-            throw new Error('需要登录');
-        }
-        throw new Error(`请求失败，状态码: ${response.status()}`);
-    }
-
-    const json = (await response.json()) as WeiboMymblogResponse;
-    if (json.ok !== 1 || !json.data?.list) {
-        throw new Error(json.error || '需要登录');
+    const json = await readWeiboResponse<WeiboMymblogResponse>(response);
+    if (json.ok !== 1 || !Array.isArray(json.data?.list)) {
+        throw new WeiboRequestError('微博个人列表响应异常，未返回有效的 data.list');
     }
 
     const cards = json.data.list.map(item => ({
@@ -243,18 +219,15 @@ export const processUserPost = async (producer: Producer, maxPages: number): Pro
                     pageSuccess = true;
                     
                 } catch (error) {
-                    const isLogin = isLoginError(error);
-                    
-                    if (isLogin) {
-                        log(`[页面进度 ${pageNum}/${actualMaxPages}] 检测到 Cookie 失效: ${error}`, 'error');
-                        break;
+                    if (error instanceof WeiboRequestError) {
+                        throw error;
                     } else {
                         log(`[页面进度 ${pageNum}/${actualMaxPages}] 获取失败 (非登录问题): ${error}`, 'error');
                         if (pageRetryCount === 0) {
                             log(`[页面进度 ${pageNum}/${actualMaxPages}] 等待 2 秒后重试...`, 'info');
                             await sleep(2000);
                         } else {
-                            break;
+                            throw error;
                         }
                     }
                     
