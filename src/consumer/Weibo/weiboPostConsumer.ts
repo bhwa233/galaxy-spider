@@ -45,10 +45,17 @@ function extractMedias(data: WeiboData, postUrl: string): MediaInfo[] {
 
     if (Array.isArray(data.status?.pics)) {
         data.status.pics.forEach((pic) => {
+            // 微博会返回字符串宽高；类型断言不会转换运行时数据。
+            // 用原生 Number 在解析边界转换，只向 Prisma 的 Int 字段传有效尺寸或 null。
+            const width = Number(pic.videoSrc ? pic.geo?.width : (pic.large?.geo?.width ?? pic.geo?.width));
+            const height = Number(pic.videoSrc ? pic.geo?.height : (pic.large?.geo?.height ?? pic.geo?.height));
+            const dimensions = {
+                width: Number.isInteger(width) && width > 0 && width <= 2_147_483_647 ? width : null,
+                height: Number.isInteger(height) && height > 0 && height <= 2_147_483_647 ? height : null,
+            };
             if (pic.videoSrc) {
                 medias.push({
-                    width: pic.geo?.width || null,
-                    height: pic.geo?.height || null,
+                    ...dimensions,
                     originMediaUrl: pic.videoSrc,
                     thumbnailUrl: pic.url || null,
                     originSrc: postUrl,
@@ -57,8 +64,7 @@ function extractMedias(data: WeiboData, postUrl: string): MediaInfo[] {
             } else {
                 const imageUrl = pic.large?.url || pic.url;
                 medias.push({
-                    width: (pic.large?.geo?.width || pic.geo?.width || null) as number | null,
-                    height: (pic.large?.geo?.height || pic.geo?.height || null) as number | null,
+                    ...dimensions,
                     originMediaUrl: imageUrl,
                     thumbnailUrl: imageUrl,
                     originSrc: postUrl,

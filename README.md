@@ -101,7 +101,7 @@ pnpm storage:refresh
 不连接数据库或微博的故障回归检查：
 
 ```bash
-pnpm exec vitest run test/producers/weibo-failure.test.ts test/utils/storageState.test.ts test/consumers/weibo-batch.test.ts test/utils/upload.test.ts test/utils/upload-failure.test.ts
+pnpm exec vitest run test/producers/weibo-failure.test.ts test/utils/storageState.test.ts test/consumers/weibo-batch.test.ts test/consumers/weibo-persistence.test.ts test/utils/upload.test.ts test/utils/upload-failure.test.ts
 ```
 
 ### Consumer 分批执行与重试
