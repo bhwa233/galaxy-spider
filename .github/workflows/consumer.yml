@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   media-consumer:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 255 # 安装依赖 + 4 小时消费预算 + 清理兜底
     permissions:
       contents: read
@@ -24,17 +24,15 @@ jobs:
     
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v2
-        with:
-          version: 8
+        uses: pnpm/action-setup@v6
 
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
