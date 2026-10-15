@@ -1,4 +1,4 @@
-import { PrismaClient, UploadStatus, type Media } from '@prisma/client';
+import { UploadStatus, type Media } from '@prisma/client';
 import { log } from '../utils/log';
 import { prisma } from '.';
 
@@ -22,46 +22,37 @@ export const updateMediaGalleryUrl = async (id:number,galleryMediaUrl:string,sta
     }
 }
 
-type MediaData = Omit<Media, 'id'|'status'|'updateTime'|'deletedAt'>
+type MediaData = Omit<Media, 'id'|'status'|'updateTime'|'deletedAt'>;
+
+export const getUploadedMedias = async (postId: string) => prisma.media.findMany({
+    where: { postId, deletedAt: null, status: UploadStatus.UPLOADED, galleryMediaUrl: { not: null } },
+    select: { originMediaUrl: true, galleryMediaUrl: true },
+});
+
 export const saveMedias = async (data: MediaData[]):Promise<number> => {
-    try {
-        if (!data?.length) {
-            log('没有需要保存的数据', 'warn');
-            return 0
+    let count = 0;
+    for (const media of data) {
+        if (!media.originMediaUrl || !media.galleryMediaUrl || !URL.canParse(media.galleryMediaUrl) ||
+            !/^https?:\/\//i.test(media.galleryMediaUrl)) {
+            throw new Error('不能把缺少源地址或图库地址的媒体保存为上传成功');
         }
-
-        const mediaUrls = data.map(img => img.originMediaUrl).filter((url): url is string => !!url);
-        const existingUrls = await prisma.media.findMany({
-            where: {
-                originMediaUrl: {
-                    in: mediaUrls
-                }
-            },
-            select: { originMediaUrl: true }
+        const existing = await prisma.media.findFirst({
+            where: { postId: media.postId, originMediaUrl: media.originMediaUrl, deletedAt: null },
         });
-
-        const existingSet = new Set(existingUrls.map(img => img.originMediaUrl));
-        const newImages = data.filter(img => img.originMediaUrl && !existingSet.has(img.originMediaUrl));
-
-        if (!newImages.length) {
-            return 0
+        const record = { ...media, status: UploadStatus.UPLOADED };
+        if (existing) {
+            // 修复旧版本留下的空图库地址；有效记录无需重复写入。
+            if (!existing.galleryMediaUrl || existing.status !== UploadStatus.UPLOADED) {
+                await prisma.media.update({ where: { id: existing.id }, data: record });
+            }
+        } else {
+            await prisma.media.create({ data: record });
         }
-
-        const result = await prisma.media.createMany({
-            data: newImages.map(img => ({
-                ...img,
-                width: Number(img?.width),
-                height: Number(img?.height),
-                status: UploadStatus.UPLOADED
-            }))
-        });
-        log(`保存成功 ${result.count} 张图片记录,跳过 ${existingUrls.length} 张`, 'success');
-        return result.count
-    } catch (error) {
-        log(`保存失败: ${error}`, 'error');
-        return 0
+        count++;
     }
-}
+    // 数据库异常向上传播，不能吞掉后再把帖子标成成功。
+    return count;
+};
 
 export async function getRemainingUploadCount(): Promise<number> {
     const result = await prisma.media.count({

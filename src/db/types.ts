@@ -1,4 +1,4 @@
-import { Producer } from "@prisma/client";
+import type { Producer } from "@prisma/client";
 
 export interface WeiboMediaContent {
     userId: number;
@@ -15,4 +15,4 @@ export interface WeiboMediaContent {
 
 export type UpdateProducer = Omit<Producer, 'createTime' | 'updateTime' | 'deletedAt'>;
 
-export type NewProducer = Pick<Producer, 'name' | 'weiboIds' | 'xiaohongshuIds' | 'douyinIds' | 'weiboChaohua'>;
+export type NewProducer = Pick<Producer, 'name' | 'type' | 'producerId'>;

@@ -101,8 +101,27 @@ pnpm storage:refresh
 不连接数据库或微博的故障回归检查：
 
 ```bash
-pnpm exec vitest run test/producers/weibo-failure.test.ts test/utils/storageState.test.ts
+pnpm exec vitest run test/producers/weibo-failure.test.ts test/utils/storageState.test.ts test/consumers/weibo-batch.test.ts test/utils/upload.test.ts test/utils/upload-failure.test.ts
 ```
+
+### Consumer 分批执行与重试
+
+Consumer 每轮有 **4 小时处理预算**，从启动后 **3 小时 45 分**起停止领取新帖子，
+最后 15 分钟用于完成当前帖子。预算耗尽时取消正在进行的请求，保存已完成进度并正常退出。
+单个帖子最多处理 15 分钟，单次下载或上传最多 60 秒。
+仅当清理卡死超过额外 1 分钟时才强制异常退出；Actions 的 255 分钟限制还包含安装依赖的时间。
+
+- 每个成功媒体立即写入数据库，只有有效的图库地址才算成功；缩略图失败不会丢弃已上传的主文件。
+- 部分失败的帖子保留 `FAILED`，下轮重新抓取并仅上传未完成媒体；视频签名变化不会导致已完成媒体重复上传。
+- 同一失败帖子每轮最多领取一次。上传遇到网络错误、429 或 5xx 最多尝试 3 次，413 等文件问题不在本轮立即重试，需排查大小限制。
+- 启动时回收超过 4 小时 15 分仍为 `PROCESSING` 的任务，保留其已保存媒体。
+- Producer 重复发现帖子时不刷新任务时间，处理中也不修改其元数据，避免延后中断任务的回收。
+- Actions 各轮互斥且不会取消正在运行的 Consumer；数据库通过条件更新领取任务，避免重复领取。
+- 偶发媒体失败、单帖超时和预算结束不使 CI 报红。数据库错误、明确的微博登录失效或拦截，以及连续 5 次微博访问故障或图库上传不可用会使本轮失败。
+- 日志展示完成、失败、保留进度的帖子数量，以及上传、跳过和失败的媒体数量；正常结束时同步写入 Actions Summary。
+
+本次调整不修改数据库结构，也不会自动批量重置旧版本已误标为 `UPLOADED` 的帖子。
+若需要补传这些历史数据，应先确认影响范围，再单独恢复其任务状态。
 
 The project uses TypeScript and follows a modular architecture. The producer modules collect data from Weibo, while the consumer modules process and store the collected data.
 

@@ -1,7 +1,6 @@
 import axios from 'axios';
 import sharp from 'sharp';
 import { log } from './log';
-import { Readable } from 'stream';
 import { retryRequest } from './index';
 import type { MediaInfo } from '../consumer/Weibo/types';
 
@@ -18,34 +17,35 @@ const SUPPORTED_EXTENSIONS = {
 
 type SupportedExtension = keyof typeof SUPPORTED_EXTENSIONS;
 
-interface MediaUploadResult {
+export interface MediaUploadResult {
     galleryUrl: string | null;
     thumbnailUrl: string | null;
+    failureKind?: 'gallery' | 'media';
 }
 
-async function downloadMedia(url: string, headers: Record<string, string>, isVideoFile: boolean): Promise<Buffer | null> {
-    try {
-        const response = await axios({
-            method: 'GET',
-            url,
-            responseType: isVideoFile ? 'stream' : 'arraybuffer',
-            headers: {
-                'Host': new URL(url).hostname,
-                ...headers,
-            },
-            timeout: 60000,
-            maxContentLength: 50 * 1024 * 1024,
-            maxBodyLength: 50 * 1024 * 1024,
-        });
+const REQUEST_TIMEOUT_MS = 60_000;
+const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
 
-        if (isVideoFile) {
-            return await streamToBuffer(response.data);
-        }
-        return Buffer.from(response.data);
-    } catch (error) {
-        log(`${isVideoFile ? '视频' : '图片'}下载失败: ${url}, ${error}`, 'error');
-        return null;
-    }
+function requestSignal(signal?: AbortSignal): AbortSignal {
+    const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+async function downloadMedia(url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<Buffer> {
+    const response = await axios({
+        method: 'GET',
+        url,
+        responseType: 'arraybuffer',
+        headers: {
+            'Host': new URL(url).hostname,
+            ...headers,
+        },
+        timeout: REQUEST_TIMEOUT_MS,
+        signal: requestSignal(signal),
+        maxContentLength: MAX_MEDIA_BYTES,
+        maxBodyLength: MAX_MEDIA_BYTES,
+    });
+    return Buffer.from(response.data);
 }
 
 export interface GalleryUploadResponse {
@@ -66,22 +66,29 @@ export interface GalleryUploadResponse {
 async function uploadToGalleryServer(
     buffer: Buffer,
     mimeType: string,
-    fileName: string 
-): Promise<GalleryUploadResponse|null> {
-    try {
-        const formData = new FormData();
-        formData.append('file', new Blob([buffer], { type: mimeType }), fileName);
+    fileName: string,
+    signal?: AbortSignal,
+): Promise<GalleryUploadResponse> {
+    const formData = new FormData();
+    formData.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), fileName);
 
-        const response = await retryRequest(async () => {
-            return await axios.post<GalleryUploadResponse[]>(`${GALLERY_URL}/upload`, formData, {
-                headers: { 'Content-Type': 'multipart/form-data' }
-            });
+    const response = await retryRequest(async () => {
+        return await axios.post<GalleryUploadResponse[]>(`${GALLERY_URL}/upload`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            timeout: REQUEST_TIMEOUT_MS,
+            signal: requestSignal(signal),
+            maxBodyLength: MAX_MEDIA_BYTES + 1024 * 1024,
         });
-        return response.data[0];
-    } catch (error) {
-        log(`上传失败: ${error}`, 'error');
-        return null;
+    }, 3, {
+        signal,
+        shouldRetry: error => axios.isAxiosError(error) &&
+            (!error.response || error.response.status === 429 || error.response.status >= 500),
+    });
+    const uploaded = response.data?.[0];
+    if (!uploaded?.src || !URL.canParse(uploaded.src) || !/^https?:\/\//i.test(uploaded.src)) {
+        throw new Error('图库未返回有效文件地址');
     }
+    return uploaded;
 }
 
 export function getFileExtension(url: string): string {
@@ -121,15 +128,6 @@ const formatFileSize = (bytes: number): string => {
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 };
 
-async function streamToBuffer(stream: Readable): Promise<Buffer> {
-    return new Promise<Buffer>((resolve, reject) => {
-        const chunks: Buffer[] = [];
-        stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
-        stream.on('error', (error) => reject(error));
-    });
-}
-
 interface ProcessedMedia {
     buffer: Buffer;
     mimeType: string;
@@ -139,7 +137,7 @@ interface ProcessedMedia {
 
 async function processImage(buffer: Buffer, quality: number): Promise<ProcessedMedia> {
     const fileName = `${Date.now()}`;
-     const webpImage = await sharp(buffer).webp({ quality }).toBuffer();
+    const webpImage = await sharp(buffer).timeout({ seconds: 60 }).webp({ quality }).toBuffer();
     return {
         buffer: webpImage,
         mimeType:  SUPPORTED_EXTENSIONS['webp'],
@@ -149,13 +147,13 @@ async function processImage(buffer: Buffer, quality: number): Promise<ProcessedM
 }
 
 
-async function processThumb(url: string, headers: Record<string, string>): Promise<string|null> {
+async function processThumb(url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<string|null> {
     const ext = getFileExtension(url).toLowerCase();
     if (!isImage(ext)) return null;
-    const thumbBuffer = await downloadMedia(url, headers, false);
-    if (!thumbBuffer) return null;
+    const thumbBuffer = await downloadMedia(url, headers, signal);
     const processed = await processImage(thumbBuffer, 40);
-    const uploadRes = await uploadToGalleryServer(processed.buffer, processed.mimeType, processed.fileName);
+    signal?.throwIfAborted();
+    const uploadRes = await uploadToGalleryServer(processed.buffer, processed.mimeType, processed.fileName, signal);
     return uploadRes?.src || null;
 }
 
@@ -183,18 +181,19 @@ async function processThumb(url: string, headers: Record<string, string>): Promi
 
 export async function uploadToGallery(
     media: MediaInfo, 
-    headers: Record<string, string> = {}
+    headers: Record<string, string> = {},
+    options: { signal?: AbortSignal } = {},
 ): Promise<MediaUploadResult> {
+    let failureKind: 'gallery' | 'media' = 'media';
     try {
+        options.signal?.throwIfAborted();
         const extension = getFileExtension(media.originMediaUrl).toLowerCase();
         if (!isImage(extension) && !isVideo(extension)) {
             log(`不支持的文件类型: ${extension} (${media.originMediaUrl})`, 'warn');
-            return { galleryUrl: null, thumbnailUrl: null };
+            return { galleryUrl: null, thumbnailUrl: null, failureKind };
         }
 
-        const isVideoFile = isVideo(extension);
-        const mediaBuffer = await downloadMedia(media.originMediaUrl, headers, isVideoFile);
-        if (!mediaBuffer) return { galleryUrl: null, thumbnailUrl: null };
+        const mediaBuffer = await downloadMedia(media.originMediaUrl, headers, options.signal);
 
         const originalSize = mediaBuffer.length;
         const fileName = `${Date.now()}.${extension}`;
@@ -213,10 +212,14 @@ export async function uploadToGallery(
             throw new Error('处理失败');
         }
 
+        if (processedMedia.size > MAX_MEDIA_BYTES) throw new Error('媒体超过 50 MB，需调整文件大小或上传方式');
+        options.signal?.throwIfAborted();
+        failureKind = 'gallery';
         const gallery = await uploadToGalleryServer(
             processedMedia.buffer,
             processedMedia.mimeType,
-            processedMedia.fileName
+            processedMedia.fileName,
+            options.signal,
         );
 
         if (!gallery?.src) {
@@ -224,7 +227,15 @@ export async function uploadToGallery(
         }
 
         // 处理缩略图
-        const thumb = media.thumbnailUrl ? await processThumb(media.thumbnailUrl, headers) : null
+        // 主文件成功即保留进度，缩略图失败不能导致下轮重复上传主文件。
+        let thumb = gallery.thumbnail?.src || null;
+        if (!thumb && media.thumbnailUrl && !options.signal?.aborted) {
+            try {
+                thumb = await processThumb(media.thumbnailUrl, headers, options.signal);
+            } catch {
+                log(`缩略图生成失败，保留已上传的主文件: ${media.originMediaUrl}`, 'warn');
+            }
+        }
 
         logUploadStats(
             media.originMediaUrl,
@@ -239,7 +250,11 @@ export async function uploadToGallery(
             thumbnailUrl: thumb
         };
     } catch (error) {
+        if (axios.isAxiosError(error) && error.response && error.response.status >= 400 &&
+            error.response.status < 500 && ![401, 403, 429].includes(error.response.status)) {
+            failureKind = 'media'; // 例如 413：下一轮再处理，当前请求不盲目重试。
+        }
         log(`处理失败: ${media.originMediaUrl}, ${error}`, 'error');
-        return { galleryUrl: null, thumbnailUrl: null };
+        return { galleryUrl: null, thumbnailUrl: null, failureKind };
     }
 }

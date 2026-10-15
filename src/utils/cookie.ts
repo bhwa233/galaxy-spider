@@ -57,7 +57,7 @@ export async function fetchCookiesFromGist(sourceDomain: string = 'weibo.com'): 
         }
         
         const data = await response.json();
-        const files = data.files as any;
+        const files = data.files as Record<string, { content?: string }>;
         
         // 查找 cookie 文件
         for (const [filename, fileInfo] of Object.entries(files)) {

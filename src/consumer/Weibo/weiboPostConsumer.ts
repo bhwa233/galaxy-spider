@@ -1,20 +1,25 @@
 import { UploadStatus } from '@prisma/client';
 import { browserManager } from '../../browser';
-import { saveMedias } from '../../db/media';
-import { getPendingPost, updatePostStatus } from '../../db/post';
+import { getUploadedMedias, saveMedias } from '../../db/media';
+import { claimNextPost, recoverStalePosts, updatePostStatus } from '../../db/post';
 import { uploadToGallery } from '../../utils/upload';
 import { log } from '../../utils/log';
-import type {   MediaInfo, WeiboData } from './types';
+import type { MediaInfo, WeiboData } from './types';
 import type { Page } from 'playwright';
+import { WeiboRequestError } from '../../producers/weibo/response';
 
+class WeiboPostUnavailableError extends Error {}
 
 function extractMedias(data: WeiboData, postUrl: string): MediaInfo[] {
     const medias: MediaInfo[] = [];
+    if (data.status?.pics && !Array.isArray(data.status.pics)) {
+        throw new Error('微博图片列表格式异常，保留帖子等待重试');
+    }
 
     // 处理视频信息
     if (data.status?.page_info?.type === 'video') {
         const video = data.status.page_info;
-        data.status.pics = data.status.pics || [];
+        data.status.pics = Array.isArray(data.status.pics) ? data.status.pics : [];
         data.status.pics.push({
             pid: video.page_pic?.pid || '',
             url: video.page_pic?.url || '',
@@ -38,8 +43,8 @@ function extractMedias(data: WeiboData, postUrl: string): MediaInfo[] {
         });
     }
 
-    if (data.status && data.status.pics) {
-        data.status.pics.forEach(async (pic) => {
+    if (Array.isArray(data.status?.pics)) {
+        data.status.pics.forEach((pic) => {
             if (pic.videoSrc) {
                 medias.push({
                     width: pic.geo?.width || null,
@@ -74,7 +79,17 @@ function extractMedias(data: WeiboData, postUrl: string): MediaInfo[] {
 export const getWeiboPost = async (id: string, page: Page) => {
     try {
         const postUrl = `https://m.weibo.cn/detail/${id}`;
-        await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        let response;
+        try {
+            response = await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        } catch (error) {
+            throw new WeiboPostUnavailableError(`访问微博失败: ${error}`);
+        }
+        if ([401, 403, 418, 429, 432].includes(response?.status() || 0) ||
+            /passport\.|\/login(?:\.php)?|\/signin/i.test(page.url())) {
+            throw new WeiboRequestError('微博登录失效或请求被拦截，请刷新登录态并检查运行环境');
+        }
+        if (response && response.status() >= 500) throw new WeiboPostUnavailableError(`微博服务暂时不可用，HTTP ${response.status()}`);
 
         // 提取 $render_data
         const renderData = await page.evaluate(() => {
@@ -82,7 +97,11 @@ export const getWeiboPost = async (id: string, page: Page) => {
             return data;
         });
 
-        if (!renderData) {
+        if (!renderData?.status) {
+            const pageText = await page.evaluate(() => document.body?.innerText || '');
+            if (/扫码登录|扫描二维码|请先登录|登录后查看|安全验证|账号异常|帐号异常/.test(pageText)) {
+                throw new WeiboRequestError('微博登录失效或需要验证，请刷新登录态并检查运行环境');
+            }
             log(`无效的数据格式: ${id}`, 'error');
             return null;
         }
@@ -90,91 +109,149 @@ export const getWeiboPost = async (id: string, page: Page) => {
         const medias = extractMedias(renderData, postUrl);
         return { medias, postUrl };
     } catch (error) {
+        if (error instanceof WeiboRequestError || error instanceof WeiboPostUnavailableError) throw error;
         log(`数据获取失败: ${id}: ${error}`, 'error');
         return null;
     }
 };
 
-export const runWeiboPostConsumer = async () => {
-    log('🚀 微博帖子消费者启动...', 'info');
-    let processedCount = 0;
-    const startTime = new Date();
-    
-    try {
-        const page = await browserManager.createPage();
-        log('浏览器页面初始化完成', 'success');
+export const CONSUMER_RUNTIME_MS = 4 * 60 * 60 * 1000;
+const SHUTDOWN_RESERVE_MS = 15 * 60 * 1000;
+const MAX_POST_RUNTIME_MS = 15 * 60 * 1000;
+const SYSTEM_FAILURE_LIMIT = 5;
 
-        while (true) {
-            const post = await getPendingPost();
-            if (!post) {
-                const endTime = new Date();
-                const duration = (endTime.getTime() - startTime.getTime()) / 1000;
-                log(`没有待处理的帖子了`, 'success');
-                log(`总计处理: ${processedCount} 个帖子, 耗时: ${duration.toFixed(1)}秒`, 'info');
+export interface ConsumerBatchOptions {
+    maxRuntimeMs?: number;
+    shutdownReserveMs?: number;
+    maxPostRuntimeMs?: number;
+    signal?: AbortSignal;
+}
+
+// 视频签名每次抓取都会变化；以实际文件路径识别已完成的同一媒体。
+// URL 和 URLSearchParams 已足够处理微博地址，无需新增解析依赖。
+function mediaKey(source: string): string {
+    const url = new URL(source);
+    const livephoto = url.searchParams.get('livephoto');
+    return livephoto ? mediaKey(livephoto) : `${url.origin}${url.pathname}`;
+}
+
+export const runWeiboPostConsumer = async (options: ConsumerBatchOptions = {}) => {
+    const startedAt = new Date();
+    const runtime = options.maxRuntimeMs ?? CONSUMER_RUNTIME_MS;
+    const deadline = startedAt.getTime() + runtime;
+    const claimDeadline = deadline - (options.shutdownReserveMs ?? SHUTDOWN_RESERVE_MS);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error('本轮时间预算已用完')), runtime);
+    const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+    const summary = {
+        completedPosts: 0, failedPosts: 0, deferredPosts: 0,
+        uploadedMedia: 0, skippedMedia: 0, failedMedia: 0,
+        stopReason: 'queue-empty' as 'queue-empty' | 'budget' | 'interrupted' | 'error',
+    };
+    let fetchFailures = 0;
+    let galleryFailures = 0;
+    let page: Page | undefined;
+    log('🚀 微博帖子消费者启动：4 小时预算，最后 15 分钟收尾', 'info');
+
+    try {
+        // 保留额外 15 分钟，避免误回收仍在收尾的旧进程。
+        const recovered = await recoverStalePosts(new Date(startedAt.getTime() - CONSUMER_RUNTIME_MS - SHUTDOWN_RESERVE_MS));
+        log(`回收 ${recovered} 个中断任务`, 'info');
+
+        while (!signal.aborted && Date.now() < claimDeadline) {
+            const post = await claimNextPost(startedAt);
+            if (!post) break;
+            if (signal.aborted || Date.now() >= claimDeadline) {
+                await updatePostStatus(post.id, UploadStatus.FAILED);
+                summary.deferredPosts++;
                 break;
             }
-
-            const postStartTime = new Date();
-            log(`[${++processedCount}] 正在处理平台 ID: ${post.platformId}`, 'info');
+            const postController = new AbortController();
+            const postTimer = setTimeout(() => postController.abort(new Error('单帖处理超过时间限制')),
+                Math.max(0, Math.min(options.maxPostRuntimeMs ?? MAX_POST_RUNTIME_MS, deadline - Date.now())));
+            const postSignal = AbortSignal.any([signal, postController.signal]);
+            let activePage: Page | undefined;
+            const closePage = () => { void activePage?.close().catch(() => {}); };
+            postSignal.addEventListener('abort', closePage, { once: true });
+            log(`正在处理平台 ID: ${post.platformId}`, 'info');
 
             try {
+                postSignal.throwIfAborted();
+                if (!page || page.isClosed()) page = await browserManager.createPage();
+                activePage = page;
+                postSignal.throwIfAborted();
                 const data = await getWeiboPost(post.platformId, page);
+                postSignal.throwIfAborted();
+                fetchFailures = 0;
                 if (!data) {
-                    log(`获取帖子数据失败，ID: ${post.platformId}`, 'error');
                     await updatePostStatus(post.id, UploadStatus.FAILED);
+                    summary.failedPosts++;
                     continue;
                 }
-                await updatePostStatus(post.id, UploadStatus.PROCESSING);
-                const { medias, postUrl } = data;
-                // 保存图片到gallery
-                let successCount = 0;
-                
-                // 开始串行上传
-                log(`开始串行上传 ${medias.length} 个媒体文件到图库...`, 'info');
-                const results = [];
-
-                for (const [index, media] of medias.entries()) {
-                    const result = await uploadToGallery(media, {
-                        Referer: 'https://weibo.com/'
-                    });
-                    
-                    if (result !== null) {
-                        successCount++;
-                        results.push(result);
-                        log(`第 ${index + 1} 个媒体文件上传成功 (${successCount}/${medias.length})`, 'success');
-                    } else {
-                        log(`第 ${index + 1} 个媒体文件上传失败 (${successCount}/${medias.length})`, 'warn');
+                const uploaded = new Set((await getUploadedMedias(post.id))
+                    .filter(media => media.originMediaUrl && media.galleryMediaUrl && URL.canParse(media.galleryMediaUrl) &&
+                        /^https?:\/\//i.test(media.galleryMediaUrl))
+                    .map(media => mediaKey(media.originMediaUrl!)));
+                let failed = false;
+                for (const media of data.medias) {
+                    postSignal.throwIfAborted();
+                    const key = mediaKey(media.originMediaUrl);
+                    if (uploaded.has(key)) {
+                        summary.skippedMedia++;
+                        continue;
                     }
+                    const result = await uploadToGallery(media, { Referer: 'https://weibo.com/' }, { signal: postSignal });
+                    if (!result.galleryUrl || !URL.canParse(result.galleryUrl) || !/^https?:\/\//i.test(result.galleryUrl)) {
+                        postSignal.throwIfAborted();
+                        summary.failedMedia++;
+                        failed = true;
+                        if (result.failureKind === 'gallery') galleryFailures++;
+                        if (galleryFailures >= SYSTEM_FAILURE_LIMIT) throw new Error('图库连续 5 次上传不可用，停止本轮消费');
+                        log(`媒体上传失败，留待下轮重试: ${media.originMediaUrl}`, 'warn');
+                        continue;
+                    }
+                    galleryFailures = 0;
+                    // 每个媒体立即落库；超时、部分失败都保留已经完成的进度。
+                    await saveMedias([{
+                        galleryMediaUrl: result.galleryUrl, thumbnailUrl: result.thumbnailUrl,
+                        originMediaUrl: media.originMediaUrl, originSrc: media.originSrc,
+                        postId: post.id, userId: post.userId, producerId: post.producerId,
+                        width: media.width, height: media.height, createTime: post.createTime,
+                    }]);
+                    uploaded.add(key);
+                    summary.uploadedMedia++;
                 }
-
-                await saveMedias(results.map((url, index) => ({
-                    galleryMediaUrl: url.galleryUrl,
-                    thumbnailUrl: url.thumbnailUrl,
-                    originMediaUrl: medias[index].originMediaUrl,
-                    postId: post.id,
-                    originSrc: medias[index].originSrc,
-                    userId: post.userId,
-                    producerId: post.producerId,
-                    width: medias[index].width,
-                    height: medias[index].height,
-                    status: UploadStatus.UPLOADED,
-                    createTime: post.createTime
-                })));
-
-                await updatePostStatus(post.id, UploadStatus.UPLOADED);
-                const postEndTime = new Date();
-                const postDuration = (postEndTime.getTime() - postStartTime.getTime()) / 1000;
-                log(`帖子处理完成，源地址: ${postUrl} ，耗时: ${postDuration.toFixed(1)}秒`, 'success');
+                await updatePostStatus(post.id, failed ? UploadStatus.FAILED : UploadStatus.UPLOADED);
+                if (failed) summary.failedPosts++;
+                else summary.completedPosts++;
             } catch (error) {
-                log(`处理帖子失败，ID: ${post.id}: ${error}`, 'error');
                 await updatePostStatus(post.id, UploadStatus.FAILED);
+                if (postSignal.aborted && (error === postSignal.reason || error instanceof WeiboPostUnavailableError)) {
+                    summary.deferredPosts++;
+                    log(`帖子 ${post.platformId} 已保留进度，留待下轮继续`, 'info');
+                } else if (error instanceof WeiboPostUnavailableError && ++fetchFailures < SYSTEM_FAILURE_LIMIT) {
+                    summary.failedPosts++;
+                    log(`微博暂时不可用，帖子 ${post.platformId} 留待下轮重试: ${error}`, 'warn');
+                } else {
+                    // 数据库错误、登录失效和持续图库故障必须让 CI 报红。
+                    summary.failedPosts++;
+                    throw error;
+                }
+            } finally {
+                clearTimeout(postTimer);
+                postSignal.removeEventListener('abort', closePage);
+                if (postSignal.aborted) await activePage?.close().catch(() => {});
             }
         }
+        if (options.signal?.aborted) summary.stopReason = 'interrupted';
+        else if (signal.aborted || Date.now() >= claimDeadline) summary.stopReason = 'budget';
+        return summary;
+    } catch (error) {
+        summary.stopReason = 'error';
+        throw error;
     } finally {
-        log('正在清理浏览器资源...', 'info');
+        clearTimeout(timer);
+        log(`本轮统计: ${JSON.stringify(summary)}`, 'info');
         await browserManager.cleanup();
-        const endTime = new Date();
-        const totalDuration = (endTime.getTime() - startTime.getTime()) / 1000;
-        log(`微博帖子消费者结束运行，总计处理: ${processedCount} 个帖子，总耗时: ${totalDuration.toFixed(1)}秒`, 'info');
     }
 };
