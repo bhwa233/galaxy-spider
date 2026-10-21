@@ -1,0 +1,4 @@
+interface:
+  display_name: "微博账号登录态同步"
+  short_description: "刷新 galaxy-spider 微博两端登录态，校验后同步 Gist 并回读确认"
+  default_prompt: "使用 $account-login-sync 同步 galaxy-spider 的微博账号登录态，完成网页端和移动端登录校验并更新既有 Gist。"
