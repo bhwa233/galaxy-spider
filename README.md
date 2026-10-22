@@ -17,7 +17,7 @@ A web crawler system designed to collect media content from Weibo topics and use
 
 - Node.js >= 22
 - [pnpm](https://pnpm.io/) package manager
-- Database (supported by Prisma)
+- todo-web D1 Worker data service (Prisma only generates local model types)
 
 ## Installation / 安装
 
@@ -72,7 +72,7 @@ src/
 
 GitHub Actions 的 Producer 和 Consumer 都会从 Gist 获取最新的
 `weibo.storage.json`。在仓库 Actions secrets 中配置 `GIST_ID`、
-`ACCESS_TOKEN`（需要读写该 Gist）和 `DATABASE_URL`。
+`ACCESS_TOKEN`（需要读写该 Gist）以及 `DATA_SERVICE_URL`、`DATA_SERVICE_TOKEN`（Worker 的爬虫专用令牌）。
 下载失败、登录失效或接口拒绝请求会使任务失败。正常空列表仍会成功结束。
 运行数据写入数据库，CI 不再自动提交文件，避免把更新后的登录态提交到仓库。
 
@@ -130,3 +130,25 @@ The project uses TypeScript and follows a modular architecture. The producer mod
 ## License / 许可证
 
 MIT
+
+## Cloudflare D1 接入
+
+数据库结构、迁移文件及 Worker 服务统一由 `todo-web/data-service/` 维护。
+爬虫继续运行在 Node.js / GitHub Actions，通过业务接口领取任务、写入进度。
+运行时不再连接 PostgreSQL；本仓 Prisma schema 仅保留兼容类型生成，不能用于建表。
+
+本地 `.env` 及 Actions Secrets 配置：
+
+```dotenv
+DATA_SERVICE_URL=https://你的数据服务.workers.dev
+DATA_SERVICE_TOKEN=数据服务的SPIDER_API_TOKEN
+```
+
+不要使用网站的 `WEB_API_TOKEN`。爬虫令牌不能访问任务、书签等网站数据。
+`pnpm migrate` 现在只生成类型，不会修改数据库。D1 建表、全量导入、逐表校验和
+停写切换步骤见 `todo-web/docs/d1-migration.md`。维护窗口内暂停 Producer、Consumer；
+校验通过并切换两端配置后，再恢复工作流。
+
+原来直接操作数据库并访问微博的测试，现在只有显式设置 `RUN_LIVE_WEIBO_TESTS=true`、
+`TEST_DATA_SERVICE_URL`（仅本机 Worker）和 `TEST_WEB_API_TOKEN` 才运行。
+故障回归测试仍可离线执行。
