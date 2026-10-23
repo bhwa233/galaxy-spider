@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@8.15.9",
   "scripts": {
-    "migrate": "npx prisma db push && npx prisma generate",
+    "migrate": "prisma generate",
     "consume": "vite-node ./src/consume.ts",
     "produce": "vite-node ./src/produce.ts",
     "produce:test": "cross-env RUN_MODE=test vite-node ./src/produce.ts",
@@ -22,14 +22,13 @@
     "vite-node": "^2.1.9"
   },
   "dependencies": {
-    "@prisma/adapter-pg": "^7.3.0",
     "@prisma/client": "7.3.0",
     "axios": "^1.13.2",
     "dotenv": "^17.2.3",
-    "pg": "^8.17.2",
     "playwright": "^1.57.0",
     "prisma": "7.3.0",
     "sharp": "^0.33.5",
+    "superjson": "2.2.6",
     "vitest": "^2.1.9"
   },
   "pnpm": {

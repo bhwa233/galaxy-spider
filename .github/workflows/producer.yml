@@ -11,7 +11,8 @@ jobs:
     permissions:
       contents: read
     env:
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DATA_SERVICE_URL: ${{ secrets.DATA_SERVICE_URL }}
+      DATA_SERVICE_TOKEN: ${{ secrets.DATA_SERVICE_TOKEN }}
       GIST_ID: ${{ secrets.GIST_ID }}
       GIST_TOKEN: ${{ secrets.ACCESS_TOKEN }}
       GIST_STORAGE_STATE_FILENAME: weibo.storage.json

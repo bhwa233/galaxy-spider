@@ -1,10 +1,19 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ProducerType } from "@prisma/client";
-import { prisma } from "../../src/db";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { ProducerType, type Producer } from "@prisma/client";
+import { callDataService } from '../../src/db/client';
+const live = process.env.RUN_LIVE_WEIBO_TESTS === 'true';
+const localUrl = process.env.TEST_DATA_SERVICE_URL;
+if (live && (!localUrl || !['localhost', '127.0.0.1', '[::1]'].includes(new URL(localUrl).hostname) || !process.env.TEST_WEB_API_TOKEN)) throw new Error('Live Weibo tests require a disposable local Worker and TEST_WEB_API_TOKEN');
+const query = <T>(model: string, operation: string, args: unknown) => callDataService<T>('query', { model, operation, args });
+const prisma = {
+    media: { deleteMany: (args: unknown) => query('media', 'deleteMany', args) },
+    post: { deleteMany: (args: unknown) => query('post', 'deleteMany', args) },
+    producer: { deleteMany: (args: unknown) => query('producer', 'deleteMany', args), create: (args: unknown) => query<Producer>('producer', 'create', args) },
+};
 import { processTopicPost } from "../../src/producers/weibo/topic";
 import { processUserPost } from "../../src/producers/weibo/person";
 
-describe('Weibo Tests', () => {
+describe.skipIf(!live)('Weibo Tests', () => {
     const testTopicProducerId = ["1008081e7ff1655717b13a336e677a40b75f5e","100808109be60c2aa9246920a02f376840e17b"]
     const testPersonProducerId = ["6183984334","5887863238","6072439004"];
     const testProducerIds = [...testTopicProducerId, ...testPersonProducerId];
@@ -41,8 +50,12 @@ describe('Weibo Tests', () => {
         });
     };
 
-    beforeAll(cleanup);
-    afterAll(cleanup);
+    beforeAll(async () => {
+        vi.stubEnv('DATA_SERVICE_URL', localUrl!);
+        vi.stubEnv('DATA_SERVICE_TOKEN', process.env.TEST_WEB_API_TOKEN!);
+        await cleanup();
+    });
+    afterAll(async () => { try { await cleanup(); } finally { vi.unstubAllEnvs(); } });
 
     describe('Topic Tests', () => {
         it.each(testTopicProducerId)('should process weibo topic successfully for producer %s', async (producerId) => {
