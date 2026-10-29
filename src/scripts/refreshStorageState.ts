@@ -1,12 +1,11 @@
 /**
  * StorageState 刷新脚本
- * 打开浏览器完成登录后导出 storageState 并上传到 Gist
+ * 打开浏览器完成登录后导出 storageState，供 SparkHub 后台导入
  */
 
 import 'dotenv/config';
 import { chromium } from 'playwright';
 import readline from 'node:readline';
-import { updateStorageStateToGist } from '../utils/storageState';
 import { readWeiboResponse } from '../producers/weibo/response';
 
 const storageStatePath = process.env.STORAGE_STATE_PATH || 'weibo.storage.json';
@@ -66,8 +65,7 @@ async function main() {
         await context.storageState({ path: storageStatePath });
         console.log(`✅ storageState 已保存到 ${storageStatePath}`);
 
-        await updateStorageStateToGist(storageStatePath);
-        console.log('✅ storageState 已上传到 Gist');
+        console.log('请将此 JSON 文件上传到 SparkHub 后台 → 采集管理 → 微博采集。');
     } finally {
         await context.close();
         await browser.close();

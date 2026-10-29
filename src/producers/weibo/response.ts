@@ -1,17 +1,19 @@
 import type { APIResponse } from 'playwright';
 
-export class WeiboRequestError extends Error {}
+export class WeiboRequestError extends Error {
+    constructor(message: string, public readonly code = 'weibo_response_invalid') { super(message); }
+}
 
 // 复用 Playwright 的响应接口，合并 person/topic 原先重复的登录错误判断。
 // HTTP 客户端无法识别微博在 HTTP 200 中返回的登录页和 ok=-100，故在这里处理。
 export async function readWeiboResponse<T>(response: Pick<APIResponse, 'status' | 'url' | 'text'>): Promise<T> {
-    const loginError = () => new WeiboRequestError('微博登录态失效，请运行 pnpm storage:refresh 重新登录并更新 Gist');
+    const loginError = () => new WeiboRequestError('微博登录态失效，请运行 pnpm storage:refresh 重新登录并在后台导入', 'weibo_login_required');
     const status = response.status();
     if (status === 401 || /passport\.|\/login(?:\.php)?|\/signin/i.test(response.url())) {
         throw loginError();
     }
     if ([403, 418, 429, 432].includes(status)) {
-        throw new WeiboRequestError(`微博拒绝请求，HTTP ${status}；停止重试。刷新登录态后若仍出现，请检查运行环境是否被拦截`);
+        throw new WeiboRequestError(`微博拒绝请求，HTTP ${status}；停止重试。刷新登录态后若仍出现，请检查运行环境是否被拦截`, 'weibo_request_blocked');
     }
     if (status !== 200) {
         throw new Error(`微博请求失败，HTTP ${status}`);

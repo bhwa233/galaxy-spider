@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { downloadGistStorageState, resolveStorageStatePath } from '../../src/utils/storageState';
+import { downloadStorageState, resolveStorageStatePath } from '../../src/utils/storageState';
+import { prepareRunCredentials } from '../../src/utils/collectorRun';
 
 let directory: string;
 let statePath: string;
@@ -17,9 +18,8 @@ beforeEach(() => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'galaxy-storage-'));
     statePath = path.join(directory, 'state.json');
     vi.stubEnv('STORAGE_STATE_PATH', statePath);
-    vi.stubEnv('GIST_ID', 'test-gist');
-    vi.stubEnv('GIST_TOKEN', 'test-token');
-    vi.stubEnv('GIST_STORAGE_STATE_FILENAME', 'weibo.storage.json');
+    vi.stubEnv('WEIBO_CREDENTIALS_URL', 'https://collector.example/api/collector/weibo/credentials');
+    vi.stubEnv('WEIBO_CREDENTIAL_READ_TOKEN', 'test-token');
 });
 
 afterEach(() => {
@@ -29,11 +29,12 @@ afterEach(() => {
 });
 
 describe('CI 登录态加载', () => {
-    // 原 CI 忽略 Gist 下载失败，继续使用旧文件并报告成功。
-    it('Gist 失败会拒绝继续爬取，即使本地有旧文件', async () => {
+    // 旧文件可能随 checkout 存在；CI 必须拒绝沿用读取失败前的旧登录态。
+    it('后台读取失败会拒绝继续爬取，即使本地有旧文件', async () => {
         fs.writeFileSync(statePath, JSON.stringify(state));
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 401 })));
-        await expect(downloadGistStorageState()).rejects.toThrow(/401/);
+        await expect(prepareRunCredentials()).rejects.toThrow(/登录态读取失败/);
+        expect(fs.readFileSync(statePath, 'utf8')).toBe(JSON.stringify(state));
     });
 
     it('过期或只登录一个域名的文件不能用于爬取', async () => {
@@ -48,14 +49,14 @@ describe('CI 登录态加载', () => {
     it('下载内容校验通过才覆盖旧登录态', async () => {
         fs.writeFileSync(statePath, 'old-state');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
-            files: { 'weibo.storage.json': { content: '{bad-json' } }
+            success: true, data: { version: '00000000-0000-4000-8000-000000000001', storageState: { cookies: [], origins: [] } }
         })));
-        await expect(downloadGistStorageState()).rejects.toThrow(/JSON/);
+        await expect(downloadStorageState()).rejects.toThrow(/weibo.com/);
         expect(fs.readFileSync(statePath, 'utf8')).toBe('old-state');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
-            files: { 'weibo.storage.json': { content: JSON.stringify(state) } }
+            success: true, data: { version: '00000000-0000-4000-8000-000000000001', storageState: state }
         })));
-        await downloadGistStorageState();
+        expect((await downloadStorageState()).version).toBe('00000000-0000-4000-8000-000000000001');
         await expect(resolveStorageStatePath()).resolves.toBe(statePath);
     });
 });

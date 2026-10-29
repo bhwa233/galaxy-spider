@@ -70,19 +70,16 @@ src/
 
 ### 微博登录态与 CI 故障恢复
 
-GitHub Actions 的 Producer 和 Consumer 都会从 Gist 获取最新的
-`weibo.storage.json`。在仓库 Actions secrets 中配置 `GIST_ID`、
-`ACCESS_TOKEN`（需要读写该 Gist）以及 `DATA_SERVICE_URL`、`DATA_SERVICE_TOKEN`（Worker 的爬虫专用令牌）。
+GitHub Actions 的 Producer 和 Consumer 都会从 SparkHub API 获取最新的
+`weibo.storage.json`。在仓库 Actions secrets 中配置 `WEIBO_CREDENTIAL_READ_TOKEN`
+以及 `DATA_SERVICE_URL`、`DATA_SERVICE_TOKEN`（数据服务的爬虫专用令牌）。
+读取令牌必须与 SparkHub API 的同名 Secret 一致，并独立于 Pocket48 的读取令牌。
+工作流默认读取 `https://api.bhwa233.com/api/collector/weibo/credentials`，
+可通过 Actions variable `WEIBO_CREDENTIALS_URL` 覆盖。
 下载失败、登录失效或接口拒绝请求会使任务失败。正常空列表仍会成功结束。
 运行数据写入数据库，CI 不再自动提交文件，避免把更新后的登录态提交到仓库。
 
-登录态失效时，在有图形界面的电脑上准备 `.env`：
-
-```dotenv
-GIST_ID=你的GistID
-GIST_TOKEN=有该Gist读写权限的Token
-STORAGE_STATE_PATH=weibo.storage.json
-```
+登录态失效时，在有图形界面的电脑上执行（不需要配置 Gist 或上传令牌）：
 
 ```bash
 pnpm install --frozen-lockfile
@@ -91,8 +88,19 @@ pnpm storage:refresh
 ```
 
 依次完成网页端与移动端微博登录，按终端提示回车。脚本会验证两端接口可用，
-然后保存登录态并上传 Gist。刷新后手动运行 Producer，成功后再运行 Consumer。
-本地可运行 `pnpm storage:fetch` 检查 Gist 下载与 Cookie 格式。
+然后保存登录态。在 SparkHub 管理后台的「采集管理 → 微博采集」中上传
+`weibo.storage.json`。保存后手动运行 Producer，成功后再运行 Consumer。
+后台导入表示格式校验与加密存储成功，实际可用性由使用同一版本凭证的任务验证。
+本地配置 `WEIBO_CREDENTIALS_URL` 和 `WEIBO_CREDENTIAL_READ_TOKEN` 后，
+可运行 `pnpm storage:fetch` 检查下载与 Cookie 格式。
+
+CI 在任务入口中创建任务记录，再获取最新凭证；下载失败不会沿用仓库中的旧文件。
+每轮固定使用启动时取得的凭证版本，新导入的版本在下一轮生效。
+任务每分钟保存进度与心跳，正常结束、部分失败、预算结束、异常失败和中断分别记录。
+任务记录的 schema、迁移与只读监控入口由 `todo-web/data-service` 维护，
+后台通过 SparkHub API 的 service binding 读取。被强制终止的任务在心跳过期后显示中断。
+Producer 的帖子数表示处理过的含媒体帖子（包含已有帖子），不是新增帖子数量。
+安装依赖等发生在任务入口执行前的失败仍以 GitHub Actions 日志为准。
 
 若刷新后 CI 仍返回 HTTP 418/432，说明登录态刷新尚未解决运行环境中的拦截，
 应在同一登录态下对比本地与 CI 请求，确认原因后再考虑使用自己的 runner。

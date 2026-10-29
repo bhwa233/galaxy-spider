@@ -13,9 +13,8 @@ jobs:
     env:
       DATA_SERVICE_URL: ${{ secrets.DATA_SERVICE_URL }}
       DATA_SERVICE_TOKEN: ${{ secrets.DATA_SERVICE_TOKEN }}
-      GIST_ID: ${{ secrets.GIST_ID }}
-      GIST_TOKEN: ${{ secrets.ACCESS_TOKEN }}
-      GIST_STORAGE_STATE_FILENAME: weibo.storage.json
+      WEIBO_CREDENTIALS_URL: ${{ vars.WEIBO_CREDENTIALS_URL || 'https://api.bhwa233.com/api/collector/weibo/credentials' }}
+      WEIBO_CREDENTIAL_READ_TOKEN: ${{ secrets.WEIBO_CREDENTIAL_READ_TOKEN }}
       STORAGE_STATE_PATH: weibo.storage.json
     
     steps:
@@ -44,9 +43,6 @@ jobs:
 
       - name: Run Crawler Regression Tests
         run: pnpm exec vitest run test/producers/weibo-failure.test.ts test/utils/storageState.test.ts
-
-      - name: Fetch storageState from Gist
-        run: pnpm run storage:fetch
 
       - name: Run Producer
         run: pnpm run produce

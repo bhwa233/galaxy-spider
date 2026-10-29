@@ -9,6 +9,7 @@ import { getProducers, getProducerById, updateProducerLastPostTime } from '../..
 import { browserManager } from '../../browser';
 import { config } from '../../config';
 import { readWeiboResponse, WeiboRequestError } from './response';
+import { recordProcessedPost, recordFailedPost, recordProcessedSource, recordWeiboAccess, assertCollectorRunning } from '../../utils/collectorRun';
 
 // Constants
 const API_CONFIG = {
@@ -128,6 +129,7 @@ const fetchPage = async (userId: string, pageNum: number, page: Page): Promise<P
     if (json.ok !== 1 || !Array.isArray(json.data?.list)) {
         throw new WeiboRequestError('微博个人列表响应异常，未返回有效的 data.list');
     }
+    recordWeiboAccess();
 
     const cards = json.data.list.map(item => ({
         ...item,
@@ -148,6 +150,7 @@ export const processPost = async (post: WeiboMblog, producer: Producer): Promise
             return 0;
         }
         
+        recordProcessedPost();
         if (!config.shouldWriteDB) {
             log(`${config.logPrefix} 发现有媒体的帖子: ${post.id}`, 'info');
             return 1;
@@ -169,6 +172,7 @@ export const processPost = async (post: WeiboMblog, producer: Producer): Promise
         log(`创建帖子成功: ${post.id}`, 'info');
         return createdPost ? 1 : 0;
     } catch (error) {
+        recordFailedPost();
         log(`处理微博帖子失败: ${error}`, 'error');
         return 0;
     }
@@ -203,6 +207,7 @@ export const processUserPost = async (producer: Producer, maxPages: number): Pro
 
         log(`开始获取用户 ${producer.name || producer.producerId} 的微博列表，计划获取 ${actualMaxPages} 页`, 'info');
         for (let pageNum = 1; pageNum <= actualMaxPages; pageNum++) {
+            assertCollectorRunning();
             let pageRetryCount = 0;
             const maxPageRetry = 2;
             let pageSuccess = false;
@@ -300,9 +305,11 @@ export const processWeiboPerson = async (maxPages: number = API_CONFIG.defaultMa
     
     try {
         for (let i = 0; i < producers.length; i++) {
+            assertCollectorRunning();
             const producer = producers[i];
             log(`[总进度 ${i + 1}/${producers.length}] 开始处理用户 ${producer.name || producer.producerId}`, 'info');
             const count = await processUserPost(producer, maxPages);
+            recordProcessedSource();
             totalProcessed += count;
             log(`[总进度 ${i + 1}/${producers.length}] 用户处理完成，成功处理 ${count} 条微博`, 'info');
             

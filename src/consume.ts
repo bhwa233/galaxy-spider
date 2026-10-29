@@ -3,8 +3,12 @@ import { CONSUMER_RUNTIME_MS, runWeiboPostConsumer } from './consumer/Weibo/weib
 import { log } from './utils/log';
 import { prisma } from './db';
 import { appendFile } from 'node:fs/promises';
+import { startCollectorRun, prepareRunCredentials, type CollectorRun } from './utils/collectorRun';
 
 async function main() {
+    let run: CollectorRun | undefined;
+    let failure: unknown;
+    let status: 'completed' | 'partial' | 'bounded' | 'failed' | 'interrupted' = 'failed';
     const controller = new AbortController();
     const onInterrupt = () => {
         process.exitCode = 1;
@@ -19,7 +23,11 @@ async function main() {
     }, CONSUMER_RUNTIME_MS + 60_000);
 
     try {
+        run = await startCollectorRun('consumer');
+        await prepareRunCredentials(run);
         const summary = await runWeiboPostConsumer({ signal: controller.signal });
+        status = summary.stopReason === 'interrupted' ? 'interrupted' : summary.stopReason === 'budget' ? 'bounded'
+            : summary.failedPosts || summary.deferredPosts || summary.failedMedia ? 'partial' : 'completed';
         if (process.env.GITHUB_STEP_SUMMARY) {
             await appendFile(process.env.GITHUB_STEP_SUMMARY,
                 `### 微博消费结果\n\n结束原因：${summary.stopReason}\n\n` +
@@ -29,11 +37,14 @@ async function main() {
                 `| 跳过已上传媒体 | ${summary.skippedMedia} |\n| 失败媒体 | ${summary.failedMedia} |\n`);
         }
     } catch (error) {
+        failure = error;
+        status = controller.signal.aborted ? 'interrupted' : 'failed';
         log('主函数出错:' + error, 'error');
         process.exitCode = 1;
     } finally {
         try {
-            await prisma.$disconnect();
+            try { await run?.finish(status, failure); }
+            finally { await prisma.$disconnect(); }
         } finally {
             clearTimeout(watchdog);
             process.removeListener('SIGTERM', onInterrupt);

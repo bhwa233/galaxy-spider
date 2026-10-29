@@ -7,6 +7,7 @@ import type { Card, WeiboTopicResponse } from './types';
 import { browserManager } from '../../browser';
 import { config } from '../../config';
 import { readWeiboResponse, WeiboRequestError } from './response';
+import { recordProcessedSource, recordWeiboAccess, assertCollectorRunning } from '../../utils/collectorRun';
 
 //Constants
 const API_CONFIG = {
@@ -62,6 +63,7 @@ export const processTopicPost = async (producer: Producer, maxPages: number): Pr
         let sinceId: number | undefined;
 
         for (let pageNum = 0; pageNum < actualMaxPages; pageNum++) {
+            assertCollectorRunning();
             let pageRetryCount = 0;
             const maxPageRetry = 2; // 每个页面最多重试 2 次
             let pageSuccess = false;
@@ -90,6 +92,7 @@ export const processTopicPost = async (producer: Producer, maxPages: number): Pr
                     if (response.ok !== 1 || !Array.isArray(response.data?.cards)) {
                         throw new WeiboRequestError('微博话题响应异常，未返回有效的 data.cards');
                     }
+                    recordWeiboAccess();
                     if (!response.data.cards.length) {
                         log(`[页面进度 ${pageNum + 1}/${actualMaxPages}] 没有更多数据，结束获取`, 'info');
                         pageSuccess = true;
@@ -194,10 +197,12 @@ export const processWeiboTopic = async (maxPages: number = API_CONFIG.defaultMax
         let totalCount = 0;
         
         for (let i = 0; i < producers.length; i++) {
+            assertCollectorRunning();
             const producer = producers[i];
             log(`[总进度 ${i + 1}/${producers.length}] 开始处理话题 ${producer.name || producer.producerId}`, 'info');
             
             const count = await processTopicPost(producer, maxPages);
+            recordProcessedSource();
             totalCount += count;
             
             log(`[总进度 ${i + 1}/${producers.length}] 话题处理完成，成功处理 ${count} 条帖子`, 'info');

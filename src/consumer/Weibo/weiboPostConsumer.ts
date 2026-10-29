@@ -7,6 +7,7 @@ import { log } from '../../utils/log';
 import type { MediaInfo, WeiboData } from './types';
 import type { Page } from 'playwright';
 import { WeiboRequestError } from '../../producers/weibo/response';
+import { recordConsumerSummary, recordWeiboAccess } from '../../utils/collectorRun';
 
 class WeiboPostUnavailableError extends Error {}
 
@@ -91,10 +92,11 @@ export const getWeiboPost = async (id: string, page: Page) => {
         } catch (error) {
             throw new WeiboPostUnavailableError(`访问微博失败: ${error}`);
         }
-        if ([401, 403, 418, 429, 432].includes(response?.status() || 0) ||
+        if (response?.status() === 401 ||
             /passport\.|\/login(?:\.php)?|\/signin/i.test(page.url())) {
-            throw new WeiboRequestError('微博登录失效或请求被拦截，请刷新登录态并检查运行环境');
+            throw new WeiboRequestError('微博登录失效，请刷新登录态', 'weibo_login_required');
         }
+        if ([403, 418, 429, 432].includes(response?.status() || 0)) throw new WeiboRequestError('微博请求被拦截，请检查运行环境', 'weibo_request_blocked');
         if (response && response.status() >= 500) throw new WeiboPostUnavailableError(`微博服务暂时不可用，HTTP ${response.status()}`);
 
         // 提取 $render_data
@@ -106,12 +108,13 @@ export const getWeiboPost = async (id: string, page: Page) => {
         if (!renderData?.status) {
             const pageText = await page.evaluate(() => document.body?.innerText || '');
             if (/扫码登录|扫描二维码|请先登录|登录后查看|安全验证|账号异常|帐号异常/.test(pageText)) {
-                throw new WeiboRequestError('微博登录失效或需要验证，请刷新登录态并检查运行环境');
+                throw new WeiboRequestError('微博登录失效或需要验证，请刷新登录态并检查运行环境', 'weibo_login_required');
             }
             log(`无效的数据格式: ${id}`, 'error');
             return null;
         }
 
+        recordWeiboAccess();
         const medias = extractMedias(renderData, postUrl);
         return { medias, postUrl };
     } catch (error) {
@@ -244,6 +247,7 @@ export const runWeiboPostConsumer = async (options: ConsumerBatchOptions = {}) =
                     throw error;
                 }
             } finally {
+                recordConsumerSummary(summary);
                 clearTimeout(postTimer);
                 postSignal.removeEventListener('abort', closePage);
                 if (postSignal.aborted) await activePage?.close().catch(() => {});
@@ -256,6 +260,7 @@ export const runWeiboPostConsumer = async (options: ConsumerBatchOptions = {}) =
         summary.stopReason = 'error';
         throw error;
     } finally {
+        recordConsumerSummary(summary);
         clearTimeout(timer);
         log(`本轮统计: ${JSON.stringify(summary)}`, 'info');
         await browserManager.cleanup();
