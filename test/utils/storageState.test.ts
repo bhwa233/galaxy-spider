@@ -54,7 +54,8 @@ describe('CI 登录态加载', () => {
         await expect(downloadStorageState()).rejects.toThrow(/weibo.com/);
         expect(fs.readFileSync(statePath, 'utf8')).toBe('old-state');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
-            success: true, data: { version: '00000000-0000-4000-8000-000000000001', storageState: state }
+            // Production exports contain localStorage caches larger than 500 KiB.
+            success: true, data: { version: '00000000-0000-4000-8000-000000000001', storageState: { ...state, origins: [{ origin: 'https://weibo.com', localStorage: [{ name: 'cache', value: 'x'.repeat(530_000) }] }] } }
         })));
         expect((await downloadStorageState()).version).toBe('00000000-0000-4000-8000-000000000001');
         await expect(resolveStorageStatePath()).resolves.toBe(statePath);

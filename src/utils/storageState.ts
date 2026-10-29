@@ -34,7 +34,7 @@ export async function downloadStorageState(): Promise<{ path: string; version: s
     });
     if (!response.ok) throw new Error(`登录态读取失败，HTTP ${response.status}`);
     const text = await response.text();
-    if (Buffer.byteLength(text) > 300 * 1024) throw new Error('登录态接口响应过大');
+    if (Buffer.byteLength(text) > 2 * 1024 * 1024) throw new Error('登录态接口响应过大');
     let payload;
     try { payload = JSON.parse(text); }
     catch { throw new Error('登录态接口未返回有效 JSON'); }
