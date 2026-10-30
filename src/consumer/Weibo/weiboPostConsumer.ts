@@ -168,7 +168,14 @@ export const runWeiboPostConsumer = async (options: ConsumerBatchOptions = {}) =
         log(`回收 ${recovered} 个中断任务`, 'info');
 
         while (!signal.aborted && Date.now() < claimDeadline) {
-            const post = await claimNextPost(startedAt);
+            let post: Awaited<ReturnType<typeof claimNextPost>>;
+            try {
+                post = await claimNextPost(startedAt, signal);
+            } catch (error) {
+                if (signal.aborted && (error === signal.reason ||
+                    (error instanceof Error && error.name === 'AbortError' && error.cause === signal.reason))) break;
+                throw error;
+            }
             if (!post) break;
             if (signal.aborted || Date.now() >= claimDeadline) {
                 await updatePostStatus(post.id, UploadStatus.FAILED);

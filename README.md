@@ -125,10 +125,12 @@ Consumer 每轮有 **4 小时处理预算**，从启动后 **3 小时 45 分**�
 - 启动时回收超过 4 小时 15 分仍为 `PROCESSING` 的任务，保留其已保存媒体。
 - Producer 重复发现帖子时不刷新任务时间，处理中也不修改其元数据，避免延后中断任务的回收。
 - Actions 各轮互斥且不会取消正在运行的 Consumer；数据库通过条件更新领取任务，避免重复领取。
+- 数据服务的只读查询、原子去重媒体写入和 `claimPostOnce` 在短暂网络故障、429 或部分 5xx 响应时最多尝试 3 次，分别等待 1 秒、2 秒；鉴权、参数、维护模式错误不重试。领取请求每次生成一个固定 UUID，重试复用同一请求体，服务端原子保存领取结果（包括空队列），避免响应丢失后再次领取其他帖子。
+- 启用本版本客户端前，必须先应用 `todo-web/data-service/migrations/0006_spider_post_claims.sql` 并部署支持 `claimPostOnce` 的数据服务。旧服务会明确报错，不会回退到无法安全重试的旧领取接口。领取记录保留 7 天，在后续任务启动时清理；清理记录不会修改帖子和媒体。
 - 偶发媒体失败、单帖超时和预算结束不使 CI 报红。数据库错误、明确的微博登录失效或拦截，以及连续 5 次微博访问故障或图库上传不可用会使本轮失败。
 - 日志展示完成、失败、保留进度的帖子数量，以及上传、跳过和失败的媒体数量；正常结束时同步写入 Actions Summary。
 
-本次调整不修改数据库结构，也不会自动批量重置旧版本已误标为 `UPLOADED` 的帖子。
+领取回执表的迁移由数据服务仓库维护，不会自动批量重置旧版本已误标为 `UPLOADED` 的帖子。
 若需要补传这些历史数据，应先确认影响范围，再单独恢复其任务状态。
 
 The project uses TypeScript and follows a modular architecture. The producer modules collect data from Weibo, while the consumer modules process and store the collected data.

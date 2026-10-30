@@ -10,8 +10,8 @@ export const updateMediaGalleryUrl = async (id: number, galleryMediaUrl: string,
 export const getUploadedMedias = (postId: string) => callDataService<Pick<Media, 'originMediaUrl' | 'galleryMediaUrl'>[]>('spider/uploadedMedia', { postId });
 export const saveMedias = async (data: MediaData[]): Promise<number> => {
     let saved = 0;
-    // Keep individual progress durable. HTTP mutation requests are not retried
-    // blindly; the Worker's media operation performs atomic deduplication.
+    // Keep individual progress durable. Only this deduplicating media write is
+    // allowlisted for network retries; arbitrary mutations are never replayed.
     for (const row of data) saved += await callDataService<number>('spider/saveMedia', [row]);
     return saved;
 };
